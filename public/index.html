@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tap Coins</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:#0f0f14; --card:#1b1b24; --text:#f2f2f7; --hint:#8b8b96;
+    --accent:#f6c343; --accent2:#5ec9ff;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  .wrap{max-width:480px;margin:0 auto;padding:16px;}
+  .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
+  .coins{font-size:28px;font-weight:700;}
+  .boost{font-size:13px;color:var(--accent);}
+  .tapzone{display:flex;flex-direction:column;align-items:center;padding:20px 0;}
+  .energybar{width:100%;height:10px;border-radius:6px;background:var(--card);overflow:hidden;margin-top:10px;}
+  .energyfill{height:100%;background:linear-gradient(90deg,var(--accent2),#8be9ff);transition:width .3s;}
+  .energytext{font-size:13px;color:var(--hint);margin-top:6px;}
+  .tapbtn{
+    width:200px;height:200px;border-radius:50%;border:none;font-size:64px;
+    background:radial-gradient(circle at 35% 30%, #ffe08a, #f6c343);
+    box-shadow:0 8px 24px rgba(246,195,67,.35); margin:16px 0; cursor:pointer;
+  }
+  .tapbtn.golden{background:radial-gradient(circle at 35% 30%, #fff6c9, #d4af37);box-shadow:0 8px 24px rgba(212,175,55,.5);}
+  .tapbtn:active{transform:scale(.94);}
+  .floatnum{position:fixed;font-weight:700;color:var(--accent);pointer-events:none;animation:float .8s ease-out forwards;z-index:10;}
+  @keyframes float{from{opacity:1;transform:translateY(0);}to{opacity:0;transform:translateY(-60px);}}
+  .tabs{display:flex;gap:8px;margin:16px 0;}
+  .tab{flex:1;padding:10px;border-radius:12px;background:var(--card);text-align:center;color:var(--hint);font-size:14px;}
+  .tab.active{background:var(--accent2);color:#04202c;font-weight:600;}
+  .panel{display:none;}
+  .panel.active{display:block;}
+  .card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;}
+  .card .info b{display:block;font-size:15px;}
+  .card .info span{font-size:13px;color:var(--hint);}
+  .buy{border:none;border-radius:10px;padding:10px 14px;font-weight:600;background:var(--accent2);color:#04202c;white-space:nowrap;}
+  .buy:disabled{opacity:.5;}
+  .buy.stars{background:var(--accent);}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--card);padding:10px 16px;border-radius:10px;font-size:14px;opacity:0;transition:opacity .3s;pointer-events:none;}
+  .toast.show{opacity:1;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="coins">🪙 <span id="coins">0</span></div>
+    <div id="boostLabel" class="boost" style="display:none;">x2 активен</div>
+  </div>
+
+  <div class="tapzone">
+    <button id="tapBtn" class="tapbtn">🪙</button>
+    <div class="energybar"><div id="energyFill" class="energyfill" style="width:100%"></div></div>
+    <div class="energytext"><span id="energyText">100/100</span> ⚡ · сила тапа <span id="tapPowerText">1</span></div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="upgrades">Улучшения</div>
+    <div class="tab" data-tab="store">Магазин ⭐</div>
+  </div>
+
+  <div id="panel-upgrades" class="panel active"></div>
+  <div id="panel-store" class="panel"></div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready(); tg.expand();
+
+const tp = tg.themeParams || {};
+if (tp.bg_color) document.documentElement.style.setProperty('--bg', tp.bg_color);
+if (tp.text_color) document.documentElement.style.setProperty('--text', tp.text_color);
+if (tp.hint_color) document.documentElement.style.setProperty('--hint', tp.hint_color);
+if (tp.secondary_bg_color) document.documentElement.style.setProperty('--card', tp.secondary_bg_color);
+
+const initData = tg.initData || '';
+const ENERGY_REGEN_MS = 3000;
+
+const UPGRADE_LABELS = {
+  tapPower: { label: 'Сила тапа', desc: v => `+1 монета за тап (сейчас ${v})`, cost: [20, 1.6] },
+  maxEnergy: { label: 'Макс. энергия', desc: v => `+10 к максимуму (сейчас ${v})`, cost: [30, 1.6] },
+};
+const STORE_ICONS = { energy_refill: '⚡', coin_boost_30m: '🚀', golden_skin: '👑', max_energy_up: '🔋' };
+
+let state = { coins:0, energy:100, maxEnergy:100, tapPower:1, levels:{tapPower:0,maxEnergy:0}, boostActive:false, skin:'default' };
+let storeItems = [];
+let dirty = false;
+
+function fmt(n){
+  n = Math.floor(n);
+  if (n < 1000) return String(n);
+  if (n < 1e6) return (n/1000).toFixed(1).replace('.0','') + 'K';
+  return (n/1e6).toFixed(2).replace(/0+$/,'').replace(/\.$/,'') + 'M';
+}
+
+function upgradeCost(type){
+  const [base, growth] = UPGRADE_LABELS[type].cost;
+  const level = state.levels[type] || 0;
+  return Math.floor(base * Math.pow(growth, level));
+}
+
+function render(){
+  document.getElementById('coins').textContent = fmt(state.coins);
+  document.getElementById('energyText').textContent = `${Math.floor(state.energy)}/${state.maxEnergy}`;
+  document.getElementById('energyFill').style.width = `${(state.energy/state.maxEnergy)*100}%`;
+  document.getElementById('tapPowerText').textContent = state.tapPower;
+  document.getElementById('boostLabel').style.display = state.boostActive ? 'block' : 'none';
+  document.getElementById('tapBtn').classList.toggle('golden', state.skin === 'golden');
+  renderUpgrades();
+  renderStore();
+}
+
+function renderUpgrades(){
+  const el = document.getElementById('panel-upgrades');
+  el.innerHTML = '';
+  for (const [type, cfg] of Object.entries(UPGRADE_LABELS)){
+    const cost = upgradeCost(type);
+    const curVal = type === 'tapPower' ? state.tapPower : state.maxEnergy;
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `<div class="info"><b>${cfg.label} (ур. ${state.levels[type]||0})</b><span>${cfg.desc(curVal)}</span></div>
+      <button class="buy" ${state.coins < cost ? 'disabled' : ''}>${fmt(cost)} 🪙</button>`;
+    div.querySelector('button').onclick = () => doUpgrade(type);
+    el.appendChild(div);
+  }
+}
+
+function renderStore(){
+  const el = document.getElementById('panel-store');
+  el.innerHTML = '';
+  for (const item of storeItems){
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `<div class="info"><b>${STORE_ICONS[item.id]||'⭐'} ${item.title}</b><span>${item.description}</span></div>
+      <button class="buy stars">${item.price} ⭐</button>`;
+    div.querySelector('button').onclick = () => buyItem(item.id);
+    el.appendChild(div);
+  }
+}
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+document.getElementById('tapBtn').addEventListener('click', (e) => {
+  if (state.energy < 1) { showToast('Нет энергии ⚡'); return; }
+  state.energy -= 1;
+  const gain = state.tapPower * (state.boostActive ? 2 : 1);
+  state.coins += gain;
+  dirty = true;
+  spawnFloat(e.target, `+${gain}`);
+  render();
+  tg.HapticFeedback && tg.HapticFeedback.impactOccurred('light');
+});
+
+function spawnFloat(target, text){
+  const f = document.createElement('div');
+  f.className = 'floatnum';
+  f.textContent = text;
+  const rect = target.getBoundingClientRect();
+  f.style.left = (rect.left + rect.width/2 - 10) + 'px';
+  f.style.top = (rect.top - 10) + 'px';
+  document.body.appendChild(f);
+  setTimeout(()=>f.remove(), 800);
+}
+
+setInterval(() => {
+  if (state.energy < state.maxEnergy){
+    state.energy = Math.min(state.maxEnergy, state.energy + 1/(ENERGY_REGEN_MS/1000));
+    render();
+  }
+}, 1000);
+
+async function doUpgrade(type){
+  const res = await fetch('/api/upgrade', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ initData, type }),
+  });
+  if (res.ok){ state = { ...state, ...(await res.json()) }; render(); }
+  else showToast('Не хватает монет');
+}
+
+async function buyItem(itemId){
+  const res = await fetch('/api/create-invoice', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ initData, itemId }),
+  });
+  const data = await res.json();
+  if (!data.invoiceUrl) { showToast('Ошибка магазина'); return; }
+  tg.openInvoice(data.invoiceUrl, (status) => {
+    if (status === 'paid'){ showToast('Покупка выполнена! ⭐'); setTimeout(syncState, 1200); }
+    else if (status === 'failed'){ showToast('Платёж не прошёл'); }
+  });
+}
+
+async function syncState(){
+  const res = await fetch('/api/state', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ initData }),
+  });
+  if (res.ok){ state = { ...state, ...(await res.json()) }; render(); }
+}
+async function saveState(){
+  if (!dirty) return;
+  dirty = false;
+  const res = await fetch('/api/save', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ initData, coins: state.coins, energy: state.energy }),
+  });
+  if (res.ok){ state = { ...state, ...(await res.json()) }; render(); }
+}
+setInterval(saveState, 6000);
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveState(); });
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+  };
+});
+
+(async () => {
+  const storeRes = await fetch('/api/store');
+  storeItems = await storeRes.json();
+  await syncState();
+  render();
+})();
+</script>
+</body>
+</html>
